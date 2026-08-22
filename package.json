@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "discord-bot": "^0.2.16",
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2"
+  }
+}

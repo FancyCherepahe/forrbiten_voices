@@ -36,6 +36,51 @@ const commands = [
         .setDescription('Displays current relay bot status and configuration')
         .setIntegrationTypes(ApplicationIntegrationType.UserInstall, ApplicationIntegrationType.GuildInstall)
         .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild, InteractionContextType.PrivateChannel),
+    new SlashCommandBuilder()
+        .setName('announcement-relay')
+        .setDescription('Relay announcement only once across multiple channles and servers')
+        .setIntegrationTypes(ApplicationIntegrationType.UserInstall, ApplicationIntegrationType.GuildInstall)
+        .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild, InteractionContextType.PrivateChannel)
+        .addStringOption(option =>
+            option.setName('message')
+            .setDescription("Type an announcement you want to announce")
+            .setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('message-sending')
+        .setDescription('Choose how the way how to relay message, with slash command or just direct message')
+        .setIntegrationTypes(ApplicationIntegrationType.UserInstall, ApplicationIntegrationType.GuildInstall)
+        .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild, InteractionContextType.PrivateChannel)
+        .addStringOption(option =>
+            option.setName('type')
+            .setDescription("Select send type")
+            .setRequired(true)
+            .addChoices(
+                {name: 'Direct Message (Simple DM Send)', value: 'false'},
+                {name: '/say (Every Message must be provided with a /say)', value: 'true'}
+            )
+        ),
+    new SlashCommandBuilder()
+        .setName('say')
+        .setDescription('Relay messages via /say command')
+        .setIntegrationTypes(ApplicationIntegrationType.UserInstall, ApplicationIntegrationType.GuildInstall)
+        .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild, InteractionContextType.PrivateChannel)
+        .addStringOption(option =>
+            option.setName('message')
+            .setDescription("Type an announcement you want to announce")
+            .setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('set-dm')
+        .setDescription('Sets the target channel ID for DM relaying')
+        .setIntegrationTypes(ApplicationIntegrationType.UserInstall, ApplicationIntegrationType.GuildInstall)
+        .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild, InteractionContextType.PrivateChannel)
+        .addStringOption(option => 
+            option.setName('user_id')
+                .setDescription('The ID of the text channel to send messages to')
+                .setRequired(true)
+        )
+        
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);

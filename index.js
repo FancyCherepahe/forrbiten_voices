@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, MessageFlags } = require('discord.js');
 
 const client = new Client({
     intents: [
@@ -11,14 +11,33 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message]
 });
 
-let embedTypeMessage = false;
-let targetChannelId = null;
+// Per-User Session Storage Map
+// Map Key: controllerId -> Value: { targetDMId, targetChannelId, embedTypeMessage, messageVerification }
+const userSessions = new Map();
+
+// Helper to retrieve or initialize a session object
+function getOrCreateSession(userId) {
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, {
+            targetDMId: null,
+            targetChannelId: null,
+            embedTypeMessage: false,
+            messageVerification: false
+        });
+    }
+    return userSessions.get(userId);
+}
 
 const commandsList = [
-    {"name": "set-channel", "usage": "/set-channel channel_id:[ID]", "description": "Use this command to set the channel where the message will be relayed"},
-    {"name": "relay-status", "usage": "/relay-status", "description": "Use this command to get general information of your relay information"},
-    {"name": "set-message-type", "usage": "/set-message-type message_type:[message type]", "description": "Use this command to change the look of your relayed command"}
-]
+    {"name": "set-channel", "usage": "/set-channel channel_id:[ID]", "description": "Set channel for relaying"},
+    {"name": "relay-status", "usage": "/relay-status", "description": "Get general relay information"},
+    {"name": "set-message-type", "usage": "/set-message-type message_type:[type]", "description": "Toggle between Normal and Embed mode"},
+    {"name": "announcement-relay", "usage": "/announcement-relay [message]", "description": "Relay announcement across channels"},
+    {"name": "message-sending", "usage": "/message-sending [type]", "description": "Toggle between Direct Message and /say mode"},
+    {"name": "set-dm", "usage": "/set-dm user_id:[ID]", "description": "Set target user for DM relaying"},
+    {"name": "say", "usage": "/say message:[text]", "description": "Send a message, just like a DM one, but only via command"}
+
+];
 
 const fields = commandsList.map(cmd => ({
     name: cmd.name ? `/${cmd.name}` : 'Unknown Command',
@@ -26,150 +45,284 @@ const fields = commandsList.map(cmd => ({
     inline: false
 }));
 
-client.on('ready', () => {
+client.on('clientReady', () => {
     console.log(`🤖 Relay Bot active as ${client.user.tag}`);
 });
 
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
-    const rawAllowed = process.env.ALLOWED_USER_ID || process.env.ALLOWED_USER_IDS || '';
-    const allowedUsers = rawAllowed.split(',').map(id => id.trim());
+    const session = getOrCreateSession(interaction.user.id);
 
-    if (!allowedUsers.includes(interaction.user.id)) {
-        return interaction.reply({ content: '⛔ Unauthorized user.', ephemeral: true });
+    // 1. /set-dm [USER_ID]
+    if (interaction.commandName === 'set-dm') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        try {
+            const inputId = (interaction.options.getString('user_id') || '').trim();
+            const targetUser = await client.users.fetch(inputId).catch(() => null);
+
+            if (!targetUser) {
+                return interaction.editReply({ content: '❌ Invalid User ID or user not found.' });
+            }
+
+            session.targetDMId = targetUser.id;
+            session.targetChannelId = null;
+           
+            return interaction.editReply({ 
+                content: `✅ Connection established!\n👤 **Controller:** <@${interaction.user.id}>\n🎯 **Target DM:** <@${targetUser.id}>`
+            });
+        } catch (err) {
+            console.error('Interaction error:', err);
+            return interaction.editReply({ content: '❌ Error processing command.' });
+        }
     }
 
-    // 1. /set-channel
+    // 2. /set-channel [ID]
     if (interaction.commandName === 'set-channel') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         try {
             const inputId = (interaction.options.getString('channel_id') || '').trim();
             const channel = await client.channels.fetch(inputId).catch(() => null);
 
             if (!channel || !channel.isTextBased()) {
-                return interaction.reply({ 
-                    content: '❌ Invalid channel ID or bot lacks view permissions.', 
-                    ephemeral: true 
-                });
+                return interaction.editReply({ content: '❌ Invalid channel ID or bot lacks access.' });
             }
 
-            targetChannelId = channel.id;
-            console.log(`✅ Target channel updated to: #${channel.name} (${channel.id})`);
+            session.targetChannelId = channel.id;
+            session.targetDMId = null;
+            
 
-            return interaction.reply({ 
-                content: `✅ Target channel successfully set to **#${channel.name}** (\`${channel.id}\`)`, 
-                ephemeral: true 
-            });
+            return interaction.editReply({ content: `✅ Target channel set to **#${channel.name}** (\`${channel.id}\`)` });
         } catch (err) {
             console.error('Interaction error:', err);
-            if (!interaction.replied) {
-                await interaction.reply({ content: '❌ Error processing command.', ephemeral: true });
-            }
+            return interaction.editReply({ content: '❌ Error processing command.' });
         }
     }
 
-    // 2. /relay-status
+    // 3. /relay-status
     if (interaction.commandName === 'relay-status') {
-        const channelMention = targetChannelId ? `<#${targetChannelId}> (\`${targetChannelId}\`)` : '❌ *Not Configured*';
-        const modeStatus = embedTypeMessage ? '🎨 Embed Mode' : '💬 Normal Mode';
-
         const statusEmbed = new EmbedBuilder()
             .setTitle('🤖 Relay Bot Dashboard')
-            .setColor(targetChannelId ? 0x57F287 : 0xED4245)
+            .setColor(session.targetDMId || session.targetChannelId ? 0x57F287 : 0xED4245)
             .addFields(
-                { name: 'Status', value: '🟢 Active & Ready', inline: true },
-                { name: 'Authorized Users', value: `\`${allowedUsers.length}\` user(s)`, inline: true },
-                { name: 'Relay Mode', value: modeStatus, inline: true },
-                { name: 'Target Channel', value: channelMention, inline: false }
+                { name: 'Active Owner', value: `<@${interaction.user.id}>`, inline: true },
+                { name: 'Target DM User', value: session.targetDMId ? `<@${session.targetDMId}>` : '❌ *Not set*', inline: true },
+                { name: 'Target Channel', value: session.targetChannelId ? `<#${session.targetChannelId}>` : '❌ *Not set*', inline: true },
+                { name: 'Relay Mode', value: session.embedTypeMessage ? '🎨 Embed Mode' : '💬 Normal Mode', inline: true },
+                { name: 'Sending Mode', value: session.messageVerification ? '🗣️ /say Mode' : '📩 Direct DM Mode', inline: true }
             )
             .setFooter({ text: `Requested by ${interaction.user.tag}` })
             .setTimestamp();
 
-        return interaction.reply({ embeds: [statusEmbed], ephemeral: true });
+        return interaction.reply({ embeds: [statusEmbed], flags: MessageFlags.Ephemeral });
     }
 
-    // 3. /set-message-type
+    // 4. /set-message-type
     if (interaction.commandName === 'set-message-type') {
         const rawTypeValue = interaction.options.getString('message_type');
-        
-        if (!rawTypeValue) {
-            return interaction.reply({ content: '❌ Missing message type selection.', ephemeral: true });
-        }
-
-        const selectedType = rawTypeValue.trim().toLowerCase();
-
-        if (selectedType === 'true' || selectedType === 'embed') {
-            embedTypeMessage = true;
-            return interaction.reply({ content: '✅ Setted message relay to: **Embed Mode**', ephemeral: true });
-        } else if (selectedType === 'false' || selectedType === 'normal') {
-            embedTypeMessage = false;
-            return interaction.reply({ content: '✅ Setted message relay to: **Normal Mode**', ephemeral: true });
-        } else {
-            return interaction.reply({ content: '❌ Failed to set mode. Please select a valid mode.', ephemeral: true });
-        }
+        session.embedTypeMessage = (rawTypeValue === 'true' || rawTypeValue === 'embed');
+        return interaction.reply({ 
+            content: `✅ Relay mode updated to: **${session.embedTypeMessage ? 'Embed Mode' : 'Normal Mode'}**`, 
+            flags: MessageFlags.Ephemeral 
+        });
     }
-    if (interaction.commandName === "help"){
+
+    // 5. /message-sending
+    if (interaction.commandName === 'message-sending') {
+        const rawTypeValue = interaction.options.getString('type');
+        session.messageVerification = (rawTypeValue === 'true');
+        return interaction.reply({ 
+            content: `✅ Message sending set to: **${session.messageVerification ? '/say' : 'Direct Message'}**`, 
+            flags: MessageFlags.Ephemeral 
+        });
+    }
+
+    // 6. /help
+    if (interaction.commandName === 'help') {
         const helpEmbed = new EmbedBuilder()
-            .setTitle("❓ Bots commands")
-            .setColor("Blue")
+            .setTitle('❓ Bot Commands')
+            .setColor('Blue')
             .addFields(fields)
             .setFooter({ text: `Requested by ${interaction.user.tag}` })
             .setTimestamp();
-        
-        return interaction.reply({ embeds: [helpEmbed] })
+
+        return interaction.reply({ embeds: [helpEmbed] });
+    }
+
+    if (interaction.commandName === 'say') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const messageToSend = interaction.options.getString('message');
+
+        // Check if user has an active DM target or Channel target set
+        if (!session.targetDMId && !session.targetChannelId) {
+            return interaction.editReply({ 
+                content: '⚠️ No target configured! Use `/set-dm` or `/set-channel` first.' 
+            });
+        }
+
+        try {
+            // Priority 1: Send via Direct Message if targetDMId is set
+            if (session.targetDMId) {
+                const targetUser = await client.users.fetch(session.targetDMId);
+
+                if (session.embedTypeMessage) {
+                    const relayEmbed = new EmbedBuilder()
+                        .setAuthor({ 
+                            name: interaction.user.username, 
+                            iconURL: interaction.user.displayAvatarURL() 
+                        })
+                        .setColor(0x008000)
+                        .setDescription(messageToSend)
+                        .setTimestamp();
+
+                    await targetUser.send({ embeds: [relayEmbed] });
+                } else {
+                    await targetUser.send({ content: messageToSend });
+                }
+
+                return interaction.editReply({ 
+                    content: `✅ Sent message to DM target **@${targetUser.username}**!` 
+                });
+            }
+
+            // Priority 2: Send via Channel if targetChannelId is set
+            if (session.targetChannelId) {
+                const targetChannel = await client.channels.fetch(session.targetChannelId);
+
+                if (session.embedTypeMessage) {
+                    const relayEmbed = new EmbedBuilder()
+                        .setAuthor({ 
+                            name: interaction.user.username, 
+                            iconURL: interaction.user.displayAvatarURL() 
+                        })
+                        .setColor(0x008000)
+                        .setDescription(messageToSend)
+                        .setTimestamp();
+
+                    await targetChannel.send({ embeds: [relayEmbed] });
+                } else {
+                    await targetChannel.send({ content: messageToSend });
+                }
+
+                return interaction.editReply({ 
+                    content: `✅ Sent message to channel **#${targetChannel.name}**!` 
+                });
+            }
+        } catch (err) {
+            console.error('Error executing /say command:', err);
+            return interaction.editReply({ 
+                content: `❌ Failed to send message: ${err.message}` 
+            });
+        }
     }
 });
 
-// Message Forwarding Handler
+// Dynamic Multi-User Relay Handler
 client.on('messageCreate', async (message) => {
     if (message.author.bot || message.guild) return;
 
-    if (message.content.startsWith('!set-channel')) return;
+    // --- OUTGOING: Active controller sending a message to their designated target ---
+    if (userSessions.has(message.author.id)) {
+        const session = userSessions.get(message.author.id);
 
-    const rawAllowed = process.env.ALLOWED_USER_ID || process.env.ALLOWED_USER_IDS || '';
-    const allowedUsers = rawAllowed.split(',').map(id => id.trim());
+        if (!session.messageVerification && session.targetDMId) {
+            try {
+                const targetUser = await client.users.fetch(session.targetDMId);
 
-    if (!allowedUsers.includes(message.author.id)) {
-        return message.reply('⛔ Unauthorized user.');
-    }
+                if (session.embedTypeMessage) {
+                    const relayEmbed = new EmbedBuilder()
+                        .setAuthor({ 
+                            name: message.author.username, 
+                            iconURL: message.author.displayAvatarURL()
+                        })
+                        .setColor(0x008000)
+                        .setDescription(message.content || '*[Attachment only]*')
+                        .setTimestamp();
 
-    if (!targetChannelId) {
-        return message.reply('⚠️ No target channel set yet! Use `/set-channel` first.');
-    }
+                    const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
+                    if (imageAttachment) {
+                        relayEmbed.setImage(imageAttachment.url);
+                    }
 
-    try {
-        const targetChannel = await client.channels.fetch(targetChannelId);
+                    await targetUser.send({ embeds: [relayEmbed] });
+                } else {
+                    await targetUser.send({
+                        content: message.content.length > 0 ? message.content : undefined,
+                        files: [...message.attachments.values()]
+                    });
+                }
 
-        if (!embedTypeMessage) {
-            // Normal Mode
-            await targetChannel.send({
-                content: message.content.length > 0 ? message.content : undefined,
-                files: [...message.attachments.values()]
-            });
-        } else {
-            // Embed Mode
-            const relayBuilder = new EmbedBuilder()
-                .setAuthor({ 
-                    name: message.author.username || message.author.tag || 'Unknown User', 
-                    iconURL: message.author.displayAvatarURL()
-                })
-                .setColor(0x008000)
-                .setDescription(message.content || '*[Attachment only]*')
-                .setFooter({ text: `User ID: ${message.author.id}` })
-                .setTimestamp();
-
-            const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
-            if (imageAttachment) {
-                relayBuilder.setImage(imageAttachment.url);
+                await message.react('✅');
+                return;
+            } catch (err) {
+                console.error('Relay error:', err);
+                return message.reply(`❌ Could not send message to target: ${err.message}`);
             }
-
-            await targetChannel.send({ embeds: [relayBuilder] });
         }
 
-        await message.react('✅');
-    } catch (err) {
-        console.error('Relay error:', err);
-        await message.reply(`❌ Failed to send message: ${err.message}`);
+        if (!session.messageVerification && session.targetChannelId) {
+            try {
+                const targetChannel = await client.channels.fetch(session.targetChannelId);
+
+                if (session.embedTypeMessage) {
+                    const relayEmbed = new EmbedBuilder()
+                        .setAuthor({ name: message.author.username, iconURL: message.author.displayAvatarURL() })
+                        .setColor(0x008000)
+                        .setDescription(message.content || '*[Attachment only]*')
+                        .setTimestamp();
+
+                    const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
+                    if (imageAttachment) relayEmbed.setImage(imageAttachment.url);
+
+                    await targetChannel.send({ embeds: [relayEmbed] });
+                } else {
+                    await targetChannel.send({
+                        content: message.content.length > 0 ? message.content : undefined,
+                        files: [...message.attachments.values()]
+                    });
+                }
+
+                await message.react('✅');
+                return;
+            } catch (err) {
+                console.error('Relay error:', err);
+                return message.reply(`❌ Could not send message to target channel: ${err.message}`);
+            }
+        }
+    }
+
+    // --- INCOMING: Target replying back to whichever controller mapped them ---
+    for (const [controllerId, session] of userSessions.entries()) {
+        if (session.targetDMId === message.author.id) {
+            try {
+                const controllerUser = await client.users.fetch(controllerId);
+                const replyEmbed = new EmbedBuilder()
+                    .setAuthor({ 
+                        name: `Reply from @${message.author.username}`, 
+                        iconURL: message.author.displayAvatarURL() 
+                    })
+                    .setDescription(message.content || '*[Attachment only]*')
+                    .setColor(0x57F287)
+                    .setFooter({ text: `Sender ID: ${message.author.id}` })
+                    .setTimestamp();
+
+                const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
+                if (imageAttachment) {
+                    replyEmbed.setImage(imageAttachment.url);
+                }
+
+                const dmChannel = await controllerUser.createDM();
+                await dmChannel.send({ embeds: [replyEmbed] });
+
+                await message.react('📩');
+                return;
+            } catch (err) {
+                console.error(`Failed to relay reply to controller ${controllerId}:`, err);
+            }
+        }
     }
 });
 
